@@ -1,11 +1,37 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import type { HeroId } from '../types/entities';
+import type { HeroId, EnemyId } from '../types/entities';
 import { useGameLoop } from '../engine/useGameLoop';
 import { GRID_ROWS, GRID_COLS, ROW_HEIGHT_PX } from '../engine/GridSystem';
 import { HERO_BLUEPRINTS, ENEMY_BLUEPRINTS } from '../data/unitRegistry';
 import { SidePanel } from './SidePanel';
 import { UpgradeModal } from './UpgradeModal';
 import { ProjectileCanvas } from './ProjectileCanvas';
+
+// ─── Animation class lookups ──────────────────────────────────────────────────
+// Applied to the innermost icon div — third transform layer, isolated from
+// positioning (outer) and spawn-slide (enemy-inner) transforms.
+
+const HERO_IDLE_CLASS: Record<HeroId, string> = {
+  inkwell:     'anim-hero-inkwell',
+  pencil:      'anim-hero-pencil',
+  eraser:      'anim-hero-eraser',
+  clicky_pen:  'anim-hero-clicky-pen',
+  highlighter: 'anim-hero-highlighter',
+  sharpie:     'anim-hero-sharpie',
+  whiteout:    'anim-hero-whiteout',
+  crayon:      'anim-hero-crayon',
+  marker:      'anim-hero-marker',
+};
+
+const ENEMY_IDLE_CLASS: Record<EnemyId, string> = {
+  paperclip:   'anim-enemy-paperclip',
+  coffee:      'anim-enemy-coffee',
+  red_tape:    'anim-enemy-red-tape',
+  shredder:    'anim-enemy-shredder',
+  rubber_band: 'anim-enemy-rubber-band',
+  stapler:     'anim-enemy-stapler',
+  sticky_note: 'anim-enemy-sticky-note',
+};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -238,7 +264,12 @@ export const GameCanvas: React.FC = () => {
                       {placedHero && (
                         /* Area 4: hero-place-anim plays once on element mount */
                         <div className="hero-place-anim" style={{ textAlign: 'center', pointerEvents: 'none' }}>
-                          <div style={{ fontSize: 20, lineHeight: 1 }}>
+                          {/* Idle personality animation on the icon — independent
+                              of the placement-pop on the parent wrapper */}
+                          <div
+                            className={HERO_IDLE_CLASS[placedHero.type]}
+                            style={{ fontSize: 20, lineHeight: 1 }}
+                          >
                             {HERO_BLUEPRINTS[placedHero.type].emoji}
                           </div>
                           {/* HP bar */}
@@ -280,12 +311,17 @@ export const GameCanvas: React.FC = () => {
                   style={{ transform: `translate(${x}px, ${y}px)` }}
                 >
                   {/* Area 4: spawn-enter plays once on mount (translateX, not fighting outer) */}
-                  <div className={`enemy-inner spawn-enter`}>
+                  <div className="enemy-inner spawn-enter">
 
                     {/* Area 4: hit flash — opacity overlay, not background-color anim */}
                     {isHit && <div className="hit-flash-overlay" />}
 
-                    <div style={{ fontSize: 18, lineHeight: 1, textAlign: 'center' }}>
+                    {/* Idle personality animation — third transform layer,
+                        isolated from both the outer translate and spawn-slide */}
+                    <div
+                      className={ENEMY_IDLE_CLASS[enemy.type]}
+                      style={{ fontSize: 18, lineHeight: 1, textAlign: 'center' }}
+                    >
                       {ENEMY_BLUEPRINTS[enemy.type].emoji}
                     </div>
 
