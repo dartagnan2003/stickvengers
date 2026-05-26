@@ -210,19 +210,55 @@
 
 body {
   font-family: 'Courier New', Courier, monospace;
-  background: #f5f0e8;
-  color: #1e293b;
+  background: #0f172a;
+  color: #f1f5f9;
   min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  margin: 0;
 }
 
 #root {
   width: 100%;
-  max-width: 1100px;
-  padding: 16px;
+  height: 100vh;
+  overflow: hidden;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MAZE v2.0 — PLAYER ANIMATIONS
+   Same constraint as enemy animations: transform + opacity only.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Player idle — gentle breathing bob */
+@keyframes playerIdle {
+  0%, 100% { transform: translateY(0)    scale(1);    }
+  40%       { transform: translateY(-3px) scale(1.04); }
+  70%       { transform: translateY(1px)  scale(0.97); }
+}
+.anim-player-idle {
+  animation: playerIdle 2.2s ease-in-out infinite;
+  display: inline-block;
+}
+
+/* Player ink-active — excited pulse, slightly larger */
+@keyframes playerInk {
+  0%, 100% { transform: scale(1)    rotate(0deg);  opacity: 1;    }
+  25%       { transform: scale(1.12) rotate(-4deg); opacity: 0.92; }
+  75%       { transform: scale(1.08) rotate(3deg);  opacity: 0.96; }
+}
+.anim-player-ink {
+  animation: playerInk 0.6s ease-in-out infinite;
+  display: inline-block;
+}
+
+/* inkPop — used by PlayerHUD ink button flash */
+@keyframes inkPop {
+  0%, 100% { transform: scale(1);    }
+  50%       { transform: scale(1.15); }
+}
+
+/* ─── Maze entity movement layer ──────────────────────────────────────────── */
+
+/* .maze-entity wraps player/enemy icons inside the grid.
+   transition:transform is set inline (component owns the value). */
 
 /* ─── Grid ───────────────────────────────────────────────────────────────────*/
 
