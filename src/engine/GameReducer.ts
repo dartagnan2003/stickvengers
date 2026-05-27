@@ -6,20 +6,28 @@
  * This is the unit that will be shared over BLE in multiplayer.
  */
 
-import type { GameState, PlayerState, EnemyState, Direction, VictoryCondition, TurnOrder } from '../types/state';
+import type { GameState, PlayerState, EnemyState, Direction } from '../types/state';
+import type { GameFormat, InventorySupply, SupplyType, SupplyTier } from '../types/supplies';
 import type { Command } from '../types/commands';
 import { computeVisibleCells, updateFogMap, makeDarkFogMap, collapseInkFog } from './FogSystem';
-import { buildMazeConfig }                                from './MazeGen';
-import { tickEnemies, spawnWaveEnemies, ENEMY_STATS }    from './PatrolSystem';
+import { buildMazeConfig }   from './MazeGen';
+import { tickEnemies, spawnWaveEnemies, ENEMY_STATS } from './PatrolSystem';
+import {
+  canPlaceSupply, applySupplyEffect, removeSupplyAt,
+  resolvePortalEntry, resolveTrapTrigger, tickPlacedSupplies,
+  getSupplyEnergyDrop, getSupplyDrop, supplyTypeToEffect,
+  addToInventory, deductFromInventory, SUPPLY_STATS,
+} from './SupplySystem';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-export const NORMAL_RADIUS   = 2;
-export const INK_RADIUS      = 5;
-export const INK_DURATION    = 4.5;   // seconds
-export const PLAYER_MAX_HP   = 10;
+export const NORMAL_RADIUS    = 2;
+export const INK_RADIUS       = 5;
+export const INK_DURATION     = 4.5;   // seconds
+export const PLAYER_MAX_HP    = 10;
 export const PLAYER_START_INK = 2;
-export const WAVE_INTERVAL   = 20.0;  // seconds between waves in SURVIVE_WAVES
+export const WAVE_INTERVAL    = 20.0;  // seconds between waves in DEFEND
+export const DEFEND_WIN_WAVES = 5;
 
 const DELTA: Record<Direction, [number, number]> = {
   N: [-1,  0],
@@ -28,19 +36,42 @@ const DELTA: Record<Direction, [number, number]> = {
   W: [ 0, -1],
 };
 
+// ─── Starting inventories per game format ─────────────────────────────────────
+
+const STARTING_INVENTORY: Record<GameFormat, InventorySupply[]> = {
+  JOURNEY: [
+    { type: 'PAPERCLIP',   tier: 1, count: 2 },
+    { type: 'HIGHLIGHTER', tier: 1, count: 1 },
+  ],
+  ATTACK: [
+    { type: 'WHITEOUT',    tier: 1, count: 2 },
+    { type: 'RUBBER_BAND', tier: 1, count: 1 },
+    { type: 'ERASER',      tier: 1, count: 2 },
+  ],
+  DEFEND: [
+    { type: 'PAPERCLIP',   tier: 1, count: 3 },
+    { type: 'STICKY_NOTE', tier: 1, count: 2 },
+    { type: 'RED_TAPE',    tier: 1, count: 1 },
+  ],
+};
+
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 export function gameReducer(state: GameState, cmd: Command): GameState {
   switch (cmd.type) {
-    case 'START_GAME': return handleStartGame(state, cmd.victoryCondition, cmd.turnOrder, cmd.seed);
-    case 'MOVE':       return handleMove(state, cmd.playerId, cmd.direction);
-    case 'USE_INK':    return handleUseInk(state, cmd.playerId);
-    case 'TICK':       return handleTick(state, cmd.delta);
-    case 'RESET':      return handleStartGame(state, state.victoryCondition, state.turnOrder);
-    case 'PAUSE':      return { ...state, phase: 'PAUSED' };
-    case 'RESUME':     return state.phase === 'PAUSED' ? { ...state, phase: 'PLAYING' } : state;
-    case 'GOTO_MENU':  return { ...makeBlankState() };
-    default:           return state;
+    case 'START_GAME':    return handleStartGame(state, cmd.gameFormat, cmd.turnOrder, cmd.seed);
+    case 'MOVE':          return handleMove(state, cmd.playerId, cmd.direction);
+    case 'USE_INK':       return handleUseInk(state, cmd.playerId);
+    case 'TICK':          return handleTick(state, cmd.delta);
+    case 'RESET':         return handleStartGame(state, state.gameFormat, state.turnOrder);
+    case 'PAUSE':         return { ...state, phase: 'PAUSED' };
+    case 'RESUME':        return state.phase === 'PAUSED' ? { ...state, phase: 'PLAYING' } : state;
+    case 'GOTO_MENU':     return { ...makeBlankState() };
+    case 'PLACE_SUPPLY':  return handlePlaceSupply(state, cmd.playerId, cmd.supplyType, cmd.tier, cmd.row, cmd.col);
+    case 'OPEN_SHOP':     return handleOpenShop(state, cmd.playerId);
+    case 'BUY_SUPPLY':    return handleBuySupply(state, cmd.playerId, cmd.supplyType, cmd.tier);
+    case 'CLOSE_SHOP':    return { ...state, shopOpen: false };
+    default:              return state;
   }
 }
 
@@ -48,22 +79,21 @@ export function gameReducer(state: GameState, cmd: Command): GameState {
 
 function handleStartGame(
   _prev: GameState,
-  vc: VictoryCondition,
-  to: TurnOrder,
+  gf:    GameFormat,
+  to:    GameState['turnOrder'],
   seed?: number,
 ): GameState {
-  const s   = seed ?? Date.now();
+  const s    = seed ?? Date.now();
   const maze = buildMazeConfig({
     rows: 9, cols: 11,
     seed: s,
-    victoryCondition: vc,
+    gameFormat: gf,
     difficulty: 2,
   });
 
   const [sr, sc] = maze.startCell;
 
-  // Build initial fog map — everything dark, then light up start area
-  const darkFog = makeDarkFogMap(maze.rows, maze.cols);
+  const darkFog  = makeDarkFogMap(maze.rows, maze.cols);
   const startVis = computeVisibleCells(sr, sc, NORMAL_RADIUS, maze.cells);
   const initFog  = updateFogMap(darkFog, startVis);
 
@@ -82,9 +112,11 @@ function handleStartGame(
     isAlive:         true,
     prizesCollected: 0,
     score:           0,
+    energy:          10,
+    maxEnergy:       50,
+    inventory:       [...STARTING_INVENTORY[gf].map(i => ({ ...i }))],
   };
 
-  // Instantiate enemies from spawn defs
   const enemies: EnemyState[] = maze.enemySpawns.map((def, i) => ({
     id:           `e_${i}`,
     type:         def.type,
@@ -103,18 +135,22 @@ function handleStartGame(
   }));
 
   return {
-    phase:            'PLAYING',
-    mode:             'SOLO',
-    tick:             0,
-    turnOrder:        to,
-    victoryCondition: vc,
+    phase:          'PLAYING',
+    mode:           'SOLO',
+    tick:           0,
+    turnOrder:      to,
+    gameFormat:     gf,
     maze,
-    players:          { p1: player },
+    players:        { p1: player },
     enemies,
-    waveNumber:       1,
-    waveTimer:        0,
-    nextWaveIn:       WAVE_INTERVAL,
-    message:          undefined,
+    waveNumber:     1,
+    waveTimer:      0,
+    nextWaveIn:     WAVE_INTERVAL,
+    message:        undefined,
+    placedSupplies: [],
+    shopNodes:      maze.shopNodes.map(n => ({ ...n, stock: [...n.stock.map(s => ({ ...s }))] })),
+    pendingPortal:  null,
+    shopOpen:       false,
   };
 }
 
@@ -136,21 +172,27 @@ function handleMove(state: GameState, playerId: string, dir: Direction): GameSta
 
   if (nr < 0 || nr >= state.maze.rows || nc < 0 || nc >= state.maze.cols) return state;
 
-  let newCells  = state.maze.cells;
-  let enemies   = state.enemies.map(e => ({ ...e }));
-  let inkCharges = player.inkCharges;
+  let newCells        = state.maze.cells;
+  let enemies         = state.enemies.map(e => ({ ...e }));
+  let inkCharges      = player.inkCharges;
   let prizesCollected = player.prizesCollected;
-  let playerHp  = player.hp;
-  let score     = player.score;
+  let playerHp        = player.hp;
+  let playerEnergy    = player.energy;
+  let inventory       = player.inventory;
+  let score           = player.score;
 
   // ── Enemy contact in destination cell ──────────────────────────────────────
   const enemyInCell = enemies.find(e => e.isAlive && e.row === nr && e.col === nc);
   if (enemyInCell) {
-    // Player defeats enemy; player takes damage
-    enemyInCell.hp     -= 99; // one-shot for now; Phase 2: player attack stat
-    enemyInCell.isAlive = enemyInCell.hp > 0;
+    enemyInCell.hp      -= 99;
+    enemyInCell.isAlive  = enemyInCell.hp > 0;
     playerHp -= enemyInCell.damage;
-    if (!enemyInCell.isAlive) score += 10;
+    if (!enemyInCell.isAlive) {
+      score         += 10;
+      playerEnergy   = Math.min(player.maxEnergy, playerEnergy + getSupplyEnergyDrop(enemyInCell.type));
+      const drop     = getSupplyDrop(enemyInCell.type);
+      if (drop) inventory = addToInventory(inventory, drop);
+    }
   }
 
   // ── Item pickup ────────────────────────────────────────────────────────────
@@ -161,16 +203,15 @@ function handleMove(state: GameState, playerId: string, dir: Direction): GameSta
       case 'PRIZE':      prizesCollected++;  score += 50; break;
       case 'HEALTH':     playerHp = Math.min(player.maxHp, playerHp + 3); break;
     }
-    // Remove item — must clone the cell row to stay immutable
     newCells = newCells.map((row, r) =>
       r !== nr ? row : row.map((c2, c) => c !== nc ? c2 : { ...c2, item: undefined }),
     );
   }
 
   // ── Update fog ─────────────────────────────────────────────────────────────
-  const radius   = player.inkActive ? player.inkRadius : NORMAL_RADIUS;
-  const visKeys  = computeVisibleCells(nr, nc, radius, newCells);
-  const newFog   = updateFogMap(player.fogMap, visKeys);
+  const radius  = player.inkActive ? player.inkRadius : NORMAL_RADIUS;
+  const visKeys = computeVisibleCells(nr, nc, radius, newCells);
+  const newFog  = updateFogMap(player.fogMap, visKeys);
 
   const updatedPlayer: PlayerState = {
     ...player,
@@ -180,7 +221,9 @@ function handleMove(state: GameState, playerId: string, dir: Direction): GameSta
     prizesCollected,
     fogMap: newFog,
     score,
-    isAlive: playerHp > 0,
+    isAlive:   playerHp > 0,
+    energy:    playerEnergy,
+    inventory,
   };
 
   let newState: GameState = {
@@ -191,10 +234,52 @@ function handleMove(state: GameState, playerId: string, dir: Direction): GameSta
     maze: { ...state.maze, cells: newCells },
   };
 
+  // ── v3: supply effects at destination ─────────────────────────────────────
+  // RED_TAPE slow zone
+  const slowTrap = newState.placedSupplies.find(
+    ps => ps.row === nr && ps.col === nc && ps.effect === 'SLOW',
+  );
+  if (slowTrap) {
+    newState = { ...newState, message: 'Slowed by red tape! 🚧' };
+    // In SEQUENTIAL: skip enemy tick this turn (handled below by early return)
+    if (state.turnOrder === 'SEQUENTIAL') {
+      newState = checkVictory(newState, playerId);
+      newState = checkDeath(newState, playerId);
+      return newState;
+    }
+  }
+
+  // STICKY_NOTE trap
+  const trapSupply = newState.placedSupplies.find(
+    ps => ps.row === nr && ps.col === nc && ps.effect === 'TRAP',
+  );
+  if (trapSupply) {
+    newState = resolveTrapTrigger(newState, playerId, true, nr, nc);
+  }
+
+  // Portal entry
+  const portalSupply = newState.placedSupplies.find(
+    ps => ps.row === nr && ps.col === nc &&
+          (ps.effect === 'PORTAL_IN' || ps.effect === 'PORTAL_OUT') &&
+          ps.linkedId,
+  );
+  if (portalSupply) {
+    newState = resolvePortalEntry(newState, playerId, portalSupply);
+  }
+
+  // Shop entry
+  if (destCell.isShop) {
+    newState = { ...newState, shopOpen: true };
+  }
+
   // ── Turn-based: enemies move after player ──────────────────────────────────
   if (state.turnOrder === 'SEQUENTIAL') {
-    newState = { ...newState, enemies: tickEnemies(newState.enemies, newCells, 1) };
+    const p1 = newState.players[playerId];
+    const pPos: [number, number] = [p1.row, p1.col];
+    newState = { ...newState, enemies: tickEnemies(newState.enemies, newCells, 1, pPos) };
     newState = resolveEnemyAttacks(newState, playerId);
+    // Enemy trap triggers after enemy movement
+    newState = resolveEnemyTraps(newState);
   }
 
   newState = checkVictory(newState, playerId);
@@ -258,7 +343,8 @@ function handleTick(state: GameState, delta: number): GameState {
   }
 
   // Tick enemies
-  const enemies = tickEnemies(state.enemies, state.maze.cells, delta);
+  const p1Pos = players['p1'] ? [players['p1'].row, players['p1'].col] as [number, number] : undefined;
+  const enemies = tickEnemies(state.enemies, state.maze.cells, delta, p1Pos);
 
   let newState: GameState = {
     ...state,
@@ -267,13 +353,16 @@ function handleTick(state: GameState, delta: number): GameState {
     enemies,
   };
 
-  // Resolve any enemy-player contacts after enemy moves
+  // Resolve enemy-player contacts
   for (const playerId of Object.keys(players)) {
     newState = resolveEnemyAttacks(newState, playerId);
   }
 
-  // ── SURVIVE_WAVES: spawn new waves ────────────────────────────────────────
-  if (state.victoryCondition === 'SURVIVE_WAVES') {
+  // Resolve enemy trap triggers
+  newState = resolveEnemyTraps(newState);
+
+  // ── DEFEND: spawn new waves ────────────────────────────────────────────────
+  if (state.gameFormat === 'DEFEND') {
     const newNextWaveIn = state.nextWaveIn - delta;
     const newWaveTimer  = state.waveTimer  + delta;
 
@@ -282,6 +371,7 @@ function handleTick(state: GameState, delta: number): GameState {
         state.waveNumber + 1,
         state.maze.rows, state.maze.cols,
         newState.enemies,
+        'DEFEND',
       );
       newState = {
         ...newState,
@@ -296,6 +386,9 @@ function handleTick(state: GameState, delta: number): GameState {
     }
   }
 
+  // Tick placed supplies (HIGHLIGHTER timers, trap reload, etc.)
+  newState = tickPlacedSupplies(newState, delta);
+
   // Prune dead enemies
   newState = { ...newState, enemies: newState.enemies.filter(e => e.isAlive) };
 
@@ -305,9 +398,164 @@ function handleTick(state: GameState, delta: number): GameState {
   return newState;
 }
 
+// ─── PLACE_SUPPLY ─────────────────────────────────────────────────────────────
+
+function handlePlaceSupply(
+  state:     GameState,
+  playerId:  string,
+  type:      SupplyType,
+  tier:      SupplyTier,
+  row:       number,
+  col:       number,
+): GameState {
+  if (state.phase !== 'PLAYING') return state;
+
+  const player = state.players[playerId];
+  if (!player?.isAlive) return state;
+
+  if (!canPlaceSupply(type, tier, row, col, state)) return state;
+
+  // Inventory check
+  const invItem = player.inventory.find(i => i.type === type && i.tier === tier);
+  if (!invItem || invItem.count < 1) return state;
+
+  // WHITEOUT: special removal handler
+  if (type === 'WHITEOUT') {
+    const newInv = deductFromInventory(player.inventory, type, tier);
+    let newState = removeSupplyAt(state, row, col, tier);
+    newState = {
+      ...newState,
+      players: { ...newState.players, [playerId]: { ...player, inventory: newInv } },
+    };
+    return newState;
+  }
+
+  // Build PlacedSupply record
+  const id     = `ps_${Date.now()}_${Math.floor(Math.random() * 9999)}`;
+  const effect = supplyTypeToEffect(type);
+
+  let linkedId: string | undefined;
+  let pendingPortal = state.pendingPortal;
+
+  // INK_BLOT portal pairing
+  if (type === 'INK_BLOT') {
+    if (pendingPortal === null) {
+      pendingPortal = id; // this becomes side A
+    } else {
+      linkedId      = pendingPortal;  // side B links to side A
+      pendingPortal = null;
+    }
+  }
+
+  // RUBBER_BAND: compute launch destination
+  if (type === 'RUBBER_BAND') {
+    const dist  = SUPPLY_STATS.RUBBER_BAND.tiers[tier].launchDist ?? 2;
+    const dr    = Math.sign(row - player.row);
+    const dc    = Math.sign(col - player.col);
+    const tr    = row + dr * dist;
+    const tc    = col + dc * dist;
+    linkedId = `${tr},${tc}`;
+  }
+
+  // INK_BLOT side B: also mark effect as PORTAL_OUT
+  const finalEffect = (type === 'INK_BLOT' && linkedId) ? 'PORTAL_OUT' : effect;
+
+  const stats  = SUPPLY_STATS[type].tiers[tier];
+  const placed = {
+    id,
+    type,
+    tier,
+    row,
+    col,
+    effect:    finalEffect,
+    linkedId,
+    turnsLeft: stats.revealDuration !== undefined ? stats.revealDuration : undefined,
+    ownerId:   playerId,
+  };
+
+  const newInv = deductFromInventory(player.inventory, type, tier);
+
+  let newState = applySupplyEffect({ ...state, pendingPortal }, placed);
+
+  // Update player inventory
+  newState = {
+    ...newState,
+    players: {
+      ...newState.players,
+      [playerId]: { ...player, inventory: newInv },
+    },
+  };
+
+  // Backfill INK_BLOT side A's linkedId if this was side B
+  if (type === 'INK_BLOT' && linkedId) {
+    newState = {
+      ...newState,
+      placedSupplies: newState.placedSupplies.map(ps =>
+        ps.id === linkedId ? { ...ps, linkedId: id } : ps,
+      ),
+    };
+  }
+
+  return newState;
+}
+
+// ─── OPEN_SHOP ────────────────────────────────────────────────────────────────
+
+function handleOpenShop(state: GameState, playerId: string): GameState {
+  const player = state.players[playerId];
+  if (!player) return state;
+  const shop = state.shopNodes.find(n => n.row === player.row && n.col === player.col);
+  if (!shop) return state;
+  return { ...state, shopOpen: true };
+}
+
+// ─── BUY_SUPPLY ───────────────────────────────────────────────────────────────
+
+function handleBuySupply(
+  state:    GameState,
+  playerId: string,
+  type:     SupplyType,
+  tier:     SupplyTier,
+): GameState {
+  const player = state.players[playerId];
+  if (!player) return state;
+
+  const cost = SUPPLY_STATS[type].tiers[tier].energyCost;
+  if (player.energy < cost) return state;
+
+  const shopIdx = state.shopNodes.findIndex(
+    n => n.row === player.row && n.col === player.col,
+  );
+  if (shopIdx < 0) return state;
+
+  const shop     = state.shopNodes[shopIdx];
+  const stockIdx = shop.stock.findIndex(s => s.type === type && s.tier === tier);
+  if (stockIdx < 0) return state;
+
+  const newStock = shop.stock
+    .map((s, i) => i === stockIdx ? { ...s, count: s.count - 1 } : s)
+    .filter(s => s.count > 0);
+
+  const newShopNodes = state.shopNodes.map((n, i) =>
+    i === shopIdx ? { ...n, stock: newStock } : n,
+  );
+
+  return {
+    ...state,
+    shopNodes: newShopNodes,
+    players: {
+      ...state.players,
+      [playerId]: {
+        ...player,
+        energy:    player.energy - cost,
+        inventory: addToInventory(player.inventory, { type, tier, count: 1 }),
+      },
+    },
+  };
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Damage the player if an enemy occupies the same cell. */
 function resolveEnemyAttacks(state: GameState, playerId: string): GameState {
   const player = state.players[playerId];
   if (!player?.isAlive) return state;
@@ -319,7 +567,7 @@ function resolveEnemyAttacks(state: GameState, playerId: string): GameState {
     return e;
   });
 
-  if (hp === player.hp) return state; // no contact
+  if (hp === player.hp) return state;
 
   return {
     ...state,
@@ -328,35 +576,51 @@ function resolveEnemyAttacks(state: GameState, playerId: string): GameState {
   };
 }
 
-/** Check win conditions after each state change. */
+/** Check if any enemy stepped on a STICKY_NOTE trap. */
+function resolveEnemyTraps(state: GameState): GameState {
+  let newState = state;
+  for (const enemy of newState.enemies) {
+    if (!enemy.isAlive) continue;
+    const trap = newState.placedSupplies.find(
+      ps => ps.row === enemy.row && ps.col === enemy.col && ps.effect === 'TRAP',
+    );
+    if (trap) {
+      newState = resolveTrapTrigger(newState, enemy.id, false, enemy.row, enemy.col);
+    }
+  }
+  return newState;
+}
+
 function checkVictory(state: GameState, playerId: string): GameState {
   const player = state.players[playerId];
   if (!player) return state;
 
-  const { victoryCondition, maze } = state;
+  const { gameFormat, maze } = state;
 
-  if (victoryCondition === 'REACH_EXIT') {
+  if (gameFormat === 'JOURNEY') {
     const [er, ec] = maze.exitCell;
-    if (player.row === er && player.col === ec) {
-      return { ...state, phase: 'VICTORY', message: 'You escaped!' };
+    if (er >= 0 && player.row === er && player.col === ec) {
+      return { ...state, phase: 'VICTORY', message: 'You escaped the maze!' };
     }
   }
 
-  if (victoryCondition === 'COLLECT_PRIZE') {
-    if (player.prizesCollected >= maze.totalPrizes) {
-      const [er, ec] = maze.exitCell;
-      if (player.row === er && player.col === ec) {
-        return { ...state, phase: 'VICTORY', message: 'All prizes collected!' };
-      }
-      // Hint: need to reach exit
-      return { ...state, message: `${player.prizesCollected}/${maze.totalPrizes} prizes — reach the exit!` };
+  if (gameFormat === 'ATTACK') {
+    const cell = maze.cells[player.row][player.col];
+    if (cell.isBase) {
+      return { ...state, phase: 'VICTORY', message: 'Enemy base captured! ⚔️' };
+    }
+  }
+
+  if (gameFormat === 'DEFEND') {
+    const TARGET = DEFEND_WIN_WAVES;
+    if (state.waveNumber > TARGET && state.enemies.filter(e => e.isAlive).length === 0) {
+      return { ...state, phase: 'VICTORY', message: `Survived ${TARGET} waves! 🛡️` };
     }
   }
 
   return state;
 }
 
-/** Check death condition. */
 function checkDeath(state: GameState, playerId: string): GameState {
   const player = state.players[playerId];
   if (!player || player.isAlive) return state;
@@ -366,23 +630,25 @@ function checkDeath(state: GameState, playerId: string): GameState {
 // ─── Blank initial state (before START_GAME) ──────────────────────────────────
 
 export function makeBlankState(): GameState {
-  // Return MENU phase so App shows the goal/mode selector on first load.
-  // START_GAME is dispatched when the user clicks "Start Game".
   const blankMaze = buildMazeConfig({
     rows: 9, cols: 11, seed: 1,
-    victoryCondition: 'REACH_EXIT', difficulty: 1,
+    gameFormat: 'JOURNEY', difficulty: 1,
   });
   return {
-    phase:            'MENU',
-    mode:             'SOLO',
-    tick:             0,
-    turnOrder:        'SIMULTANEOUS',
-    victoryCondition: 'REACH_EXIT',
-    maze:             blankMaze,
-    players:          {},
-    enemies:          [],
-    waveNumber:       0,
-    waveTimer:        0,
-    nextWaveIn:       0,
+    phase:          'MENU',
+    mode:           'SOLO',
+    tick:           0,
+    turnOrder:      'SIMULTANEOUS',
+    gameFormat:     'JOURNEY',
+    maze:           blankMaze,
+    players:        {},
+    enemies:        [],
+    waveNumber:     0,
+    waveTimer:      0,
+    nextWaveIn:     0,
+    placedSupplies: [],
+    shopNodes:      [],
+    pendingPortal:  null,
+    shopOpen:       false,
   };
 }

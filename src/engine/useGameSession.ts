@@ -12,7 +12,8 @@
 
 import { useReducer, useEffect, useRef, useCallback } from 'react';
 import { gameReducer, makeBlankState }  from './GameReducer';
-import type { GameState, Direction, VictoryCondition, TurnOrder } from '../types/state';
+import type { GameState, Direction, TurnOrder } from '../types/state';
+import type { GameFormat, SupplyType, SupplyTier } from '../types/supplies';
 
 // ─── Key map ──────────────────────────────────────────────────────────────────
 
@@ -20,11 +21,8 @@ const KEY_TO_DIR: Record<string, Direction> = {
   ArrowUp:    'N', w: 'N', W: 'N',
   ArrowRight: 'E', d: 'E', D: 'E',
   ArrowDown:  'S', s: 'S', S: 'S',
-  ArrowLeft:  'W', a: 'W',
+  ArrowLeft:  'W', a: 'W', A: 'W',
 };
-// Fix the 'a' mapping correctly
-KEY_TO_DIR['a'] = 'W';
-KEY_TO_DIR['A'] = 'W';
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
@@ -57,7 +55,6 @@ export function useGameSession() {
   // ── Keyboard input ─────────────────────────────────────────────────────────
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Ignore if typing in an input field
       if (e.target instanceof HTMLInputElement) return;
 
       const dir = KEY_TO_DIR[e.key];
@@ -81,12 +78,12 @@ export function useGameSession() {
   // ── Public actions ─────────────────────────────────────────────────────────
 
   const startGame = useCallback((
-    vc: VictoryCondition,
-    to: TurnOrder,
+    gf:   GameFormat,
+    to:   TurnOrder,
     seed?: number,
   ) => {
     lastTimeRef.current = 0;
-    dispatch({ type: 'START_GAME', victoryCondition: vc, turnOrder: to, seed });
+    dispatch({ type: 'START_GAME', gameFormat: gf, turnOrder: to, seed });
   }, []);
 
   const movePlayer = useCallback((dir: Direction) => {
@@ -106,5 +103,25 @@ export function useGameSession() {
   const resume   = useCallback(() => dispatch({ type: 'RESUME' }),    []);
   const goToMenu = useCallback(() => dispatch({ type: 'GOTO_MENU' }), []);
 
-  return { state, startGame, movePlayer, useInk, reset, pause, resume, goToMenu };
+  const placeSupply = useCallback((
+    supplyType: SupplyType,
+    tier:       SupplyTier,
+    row:        number,
+    col:        number,
+  ) => {
+    dispatch({ type: 'PLACE_SUPPLY', playerId: 'p1', supplyType, tier, row, col });
+  }, []);
+
+  const openShop  = useCallback(() => dispatch({ type: 'OPEN_SHOP',  playerId: 'p1' }), []);
+  const closeShop = useCallback(() => dispatch({ type: 'CLOSE_SHOP' }), []);
+
+  const buySupply = useCallback((supplyType: SupplyType, tier: SupplyTier) => {
+    dispatch({ type: 'BUY_SUPPLY', playerId: 'p1', supplyType, tier });
+  }, []);
+
+  return {
+    state,
+    startGame, movePlayer, useInk, reset, pause, resume, goToMenu,
+    placeSupply, openShop, closeShop, buySupply,
+  };
 }
