@@ -26,7 +26,7 @@ export const INK_RADIUS       = 5;
 export const INK_DURATION     = 4.5;   // seconds
 export const PLAYER_MAX_HP    = 10;
 export const PLAYER_START_INK = 2;
-export const WAVE_INTERVAL    = 20.0;  // seconds between waves in DEFEND
+export const WAVE_INTERVAL    = 12.0;  // seconds between waves in DEFEND (was 20 — much faster pressure)
 export const DEFEND_WIN_WAVES = 5;
 
 const DELTA: Record<Direction, [number, number]> = {
@@ -49,9 +49,10 @@ const STARTING_INVENTORY: Record<GameFormat, InventorySupply[]> = {
     { type: 'ERASER',      tier: 1, count: 2 },
   ],
   DEFEND: [
-    { type: 'PAPERCLIP',   tier: 1, count: 3 },
-    { type: 'STICKY_NOTE', tier: 1, count: 2 },
-    { type: 'RED_TAPE',    tier: 1, count: 1 },
+    { type: 'PAPERCLIP',   tier: 1, count: 4 },
+    { type: 'STICKY_NOTE', tier: 1, count: 3 },
+    { type: 'RED_TAPE',    tier: 1, count: 2 },
+    { type: 'HIGHLIGHTER', tier: 1, count: 1 },
   ],
 };
 
@@ -84,11 +85,15 @@ function handleStartGame(
   seed?: number,
 ): GameState {
   const s    = seed ?? Date.now();
+  // DEFEND gets a larger maze — more corridors to fortify, more paths for enemies to exploit
+  const mazeRows = gf === 'DEFEND' ? 11 : 9;
+  const mazeCols = gf === 'DEFEND' ? 13 : 11;
+  const mazeDiff = gf === 'DEFEND' ? 3 : 2;
   const maze = buildMazeConfig({
-    rows: 9, cols: 11,
+    rows: mazeRows, cols: mazeCols,
     seed: s,
     gameFormat: gf,
-    difficulty: 2,
+    difficulty: mazeDiff,
   });
 
   const [sr, sc] = maze.startCell;
@@ -561,17 +566,19 @@ function resolveEnemyAttacks(state: GameState, playerId: string): GameState {
   if (!player?.isAlive) return state;
 
   let hp = player.hp;
-  const enemies = state.enemies.map(e => {
-    if (!e.isAlive || e.row !== player.row || e.col !== player.col) return e;
+  state.enemies.forEach(e => {
+    if (!e.isAlive || e.row !== player.row || e.col !== player.col) return;
+    // In real-time (SIMULTANEOUS) mode, only deal damage the exact tick the enemy
+    // moved onto this cell — identified by moveTimer === moveInterval (just reset).
+    // Without this guard, enemies would deal damage at 60 fps while sharing a cell,
+    // making contact instantly lethal.
+    if (state.turnOrder === 'SIMULTANEOUS' && e.moveTimer !== e.moveInterval) return;
     hp -= e.damage;
-    return e;
   });
 
   if (hp === player.hp) return state;
-
   return {
     ...state,
-    enemies,
     players: { ...state.players, [playerId]: { ...player, hp, isAlive: hp > 0 } },
   };
 }

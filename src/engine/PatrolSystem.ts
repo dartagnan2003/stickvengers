@@ -136,18 +136,18 @@ function doChase(
 // ─── Wave spawning (DEFEND format) ───────────────────────────────────────────
 
 const WAVE_ENEMY_POOLS: EnemyType[][] = [
-  ['PAPERCLIP', 'PAPERCLIP', 'STAPLER'],
-  ['PAPERCLIP', 'STAPLER', 'RED_TAPE'],
-  ['STAPLER', 'RED_TAPE', 'RUBBER_BAND'],
-  ['RED_TAPE', 'RUBBER_BAND', 'SHREDDER'],
+  ['PAPERCLIP', 'PAPERCLIP', 'RED_TAPE'],                      // wave 1 — immediate pressure
+  ['PAPERCLIP', 'STAPLER', 'RED_TAPE', 'RED_TAPE'],            // wave 2 — more speed
+  ['STAPLER', 'RED_TAPE', 'RUBBER_BAND', 'RUBBER_BAND'],       // wave 3 — fast + hard-hitting
+  ['RED_TAPE', 'RUBBER_BAND', 'SHREDDER'],                     // wave 4+ — heavy assault
 ];
 
 export const ENEMY_STATS: Record<EnemyType, { hp: number; damage: number; moveInterval: number }> = {
-  PAPERCLIP:   { hp: 2,  damage: 1, moveInterval: 1.2 },
-  STAPLER:     { hp: 4,  damage: 2, moveInterval: 1.8 },
-  RED_TAPE:    { hp: 3,  damage: 1, moveInterval: 0.8 },
-  RUBBER_BAND: { hp: 3,  damage: 2, moveInterval: 0.6 },
-  SHREDDER:    { hp: 10, damage: 5, moveInterval: 2.5 },
+  PAPERCLIP:   { hp: 2,  damage: 1, moveInterval: 0.85 },  // was 1.2 — snappier scouts
+  STAPLER:     { hp: 5,  damage: 2, moveInterval: 1.3  },  // was 1.8, +1 hp — tankier
+  RED_TAPE:    { hp: 3,  damage: 2, moveInterval: 0.65 },  // was 0.8, +1 dmg — fast harassment
+  RUBBER_BAND: { hp: 4,  damage: 3, moveInterval: 0.5  },  // was 0.6, +1 hp +1 dmg — rocket
+  SHREDDER:    { hp: 10, damage: 5, moveInterval: 1.6  },  // was 2.5 — much more aggressive
 };
 
 let _enemyCounter = 0;
@@ -160,9 +160,9 @@ export function spawnWaveEnemies(
   gameFormat?: GameFormat,
 ): EnemyState[] {
   const pool  = WAVE_ENEMY_POOLS[Math.min(waveNumber - 1, WAVE_ENEMY_POOLS.length - 1)];
-  // More enemies per wave in DEFEND; scale aggressively
-  const baseCount = gameFormat === 'DEFEND' ? 3 + waveNumber * 2 : 2 + Math.floor(waveNumber * 1.5);
-  const count = Math.min(baseCount, 20);
+  // Steep scaling in DEFEND — each wave meaningfully harder
+  const baseCount = gameFormat === 'DEFEND' ? 5 + waveNumber * 3 : 2 + Math.floor(waveNumber * 1.5);
+  const count = Math.min(baseCount, 28);
   const newEnemies: EnemyState[] = [];
 
   // DEFEND: spawn from all 4 edges. Otherwise: right edge only.
